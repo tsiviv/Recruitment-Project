@@ -3,7 +3,6 @@ using log4net.Config;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
 using PublicComplaintForm_API.Models;
 using PublicComplaintForm_API.Services;
@@ -27,6 +26,11 @@ if (!Directory.Exists(logDir))
 
 string logPath = Path.Combine(baseDir, "logs", "app.log");
 
+// Configure logging first so startup issues (e.g. bad configuration) can actually be logged.
+var logRepo = LogManager.GetRepository(Assembly.GetEntryAssembly());
+XmlConfigurator.Configure(logRepo, new FileInfo("log4net.config"));
+var appLog = LogManager.GetLogger(typeof(Program));
+
 var builder = WebApplication.CreateBuilder(args);
 
 var serverIdentity = Environment.GetEnvironmentVariable("ServerIdentity")
@@ -37,25 +41,26 @@ try
 {
     builder.Configuration.GetSection(serverIdentity).Bind(envConfig);
 }
-catch(Exception ex)
+catch (Exception ex)
 {
-    envConfig = new ConfigSettings();
-    envConfig.SaveFileFolder = "DEFAULT VALUE";
-    envConfig.LocalSQL = "DEFAULT VALUE";
-    envConfig.SurveySQLConnectionString = "DEFAULT VALUE";
-}
+    appLog.Warn($"Failed to bind configuration section '{serverIdentity}'. Falling back to default values.", ex);
 
-var logRepo = LogManager.GetRepository(Assembly.GetEntryAssembly());
-XmlConfigurator.Configure(logRepo, new FileInfo("log4net.config"));
+    envConfig = new ConfigSettings
+    {
+        SaveFileFolder = "DEFAULT VALUE",
+        LocalSQL = "DEFAULT VALUE",
+        SurveySQLConnectionString = "DEFAULT VALUE"
+    };
+}
 
 var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
 {
     ".pdf", ".doc", ".docx", ".png", ".jpeg", ".jpg", ".gif", ".ogg", ".mp4", ".mp3", ".msg"
 };
 
-var dbService = new DatabaseService(envConfig.LocalSQL, envConfig.SurveySQLConnectionString, LogManager.GetLogger(typeof(Program)));
+var dbService = new DatabaseService(envConfig.LocalSQL, envConfig.SurveySQLConnectionString, appLog);
 
-builder.Services.AddSingleton(LogManager.GetLogger(typeof(Program)));
+builder.Services.AddSingleton(appLog);
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton(dbService);
 builder.Services.AddSingleton<CaptchaService>();
@@ -77,13 +82,22 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+// Builds a consistent JSON error response ({ error, requestId }) and logs the underlying
+// exception, so every endpoint reports failures the same way instead of each rolling its own.
+static IResult BuildErrorResponse(ILog log, Exception ex, string logMessage, string publicMessage = "An error occurred while processing your request.", int statusCode = StatusCodes.Status500InternalServerError)
 {
-    app.UseCors("LocalDev");
+    log.Error(logMessage, ex);
+
+    return Results.Json(new
+    {
+        error = publicMessage,
+        requestId = Activity.Current?.Id ?? Guid.NewGuid().ToString()
+    }, statusCode: statusCode);
 }
 
 if (app.Environment.IsDevelopment())
 {
+    app.UseCors("LocalDev");
     app.UseDeveloperExceptionPage();
 }
 else
@@ -92,20 +106,14 @@ else
     {
         exceptionHandlerApp.Run(async context =>
         {
-            context.Response.StatusCode = StatusCodes.Status200OK;
-            context.Response.ContentType = "application/json";
-
             var exceptionHandlerPathFeature = context.Features.Get<IExceptionHandlerPathFeature>();
-            var exception = exceptionHandlerPathFeature?.Error;
+            var exception = exceptionHandlerPathFeature?.Error ?? new Exception("Unknown error");
 
-            var logger = context.RequestServices.GetService<ILog>();
-            logger?.Info("Unhandled exception: " + exception?.Message);
+            var logger = context.RequestServices.GetRequiredService<ILog>();
 
-            await context.Response.WriteAsJsonAsync(new
-            {
-                error = "An error has occurred processing your request." + exception?.Message,
-                requestId = System.Diagnostics.Activity.Current?.Id ?? context.TraceIdentifier
-            });
+            var result = BuildErrorResponse(logger, exception, "Unhandled exception reached the global handler.");
+
+            await result.ExecuteAsync(context);
         });
     });
 }
@@ -122,7 +130,7 @@ app.Use(async (context, next) =>
     await next();
 });
 
-app.MapGet("/", async ([FromServices] ILog log) =>
+app.MapGet("/", ([FromServices] ILog log) =>
 {
     log.Info("Someone accessed root endpoint. (Endpoint: /)");
     return Results.Json("API is running...");
@@ -131,78 +139,105 @@ app.MapGet("/", async ([FromServices] ILog log) =>
 app.MapGet("/courts", async ([FromServices] ILog log,
                             [FromServices] DatabaseService db) =>
 {
-    //await logger.LogAsync("Someone accessed /courts endpoint. (Endpoint: /courts)");
-    log.Info("Someone accessed /courts endpoint.");
-    List<Court> courtsList = await db.FetchCourtList();
+    try
+    {
+        log.Info("Someone accessed /courts endpoint.");
+        List<Court> courtsList = await db.FetchCourtList();
 
-    return Results.Ok(new { courtsList });
+        return Results.Ok(new { courtsList });
+    }
+    catch (Exception ex)
+    {
+        return BuildErrorResponse(log, ex, "Failed to fetch courts list.", "Failed to load courts list.");
+    }
 });
 
 app.MapGet("/reports/monthly-complaints", async ([FromServices] ILog log,
                                                    [FromServices] DatabaseService db,
                                                    HttpContext context) =>
 {
-    var reportDate = DateTime.UtcNow;
-    var year = reportDate.Year;
-    var month = reportDate.Month;
+    try
+    {
+        var reportDate = DateTime.UtcNow;
+        var year = reportDate.Year;
+        var month = reportDate.Month;
 
-    if (context.Request.Query.TryGetValue("year", out var yearVal) && int.TryParse(yearVal, out var parsedYear))
-        year = parsedYear;
+        if (context.Request.Query.TryGetValue("year", out var yearVal) && int.TryParse(yearVal, out var parsedYear))
+            year = parsedYear;
 
-    if (context.Request.Query.TryGetValue("month", out var monthVal) && int.TryParse(monthVal, out var parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12)
-        month = parsedMonth;
+        if (context.Request.Query.TryGetValue("month", out var monthVal) && int.TryParse(monthVal, out var parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12)
+            month = parsedMonth;
 
-    log.Info($"Someone accessed /reports/monthly-complaints endpoint. (Year: {year}, Month: {month})");
+        log.Info($"Someone accessed /reports/monthly-complaints endpoint. (Year: {year}, Month: {month})");
 
-    var report = await db.GetMonthlyComplaintReport(year, month);
+        var report = await db.GetMonthlyComplaintReport(year, month);
 
-    return Results.Ok(new { year, month, report });
+        return Results.Ok(new { year, month, report });
+    }
+    catch (Exception ex)
+    {
+        return BuildErrorResponse(log, ex, "Failed to generate monthly complaints report.", "Failed to generate report.");
+    }
 });
 
 app.MapGet("/captcha", async ([FromServices] CaptchaService cs,
                                 [FromServices] ILog log,
                                 IMemoryCache cache) =>
 {
-    //await logger.LogAsync("Someone accessed /captcha endpoint.");
-    log.Info("Someone accessed /captcha endpoint.");
-
-    var captcha = cs.GenerateCaptcha();
-
-    var sessionId = Guid.NewGuid().ToString();
-
-    cache.Set(sessionId, captcha.Code, TimeSpan.FromHours(1));
-
-    using (var ms = new MemoryStream())
+    try
     {
+        log.Info("Someone accessed /captcha endpoint.");
+
+        var captcha = cs.GenerateCaptcha();
+
+        var sessionId = Guid.NewGuid().ToString();
+
+        cache.Set(sessionId, captcha.Code, TimeSpan.FromHours(1));
+
+        using var ms = new MemoryStream();
+
         await captcha.Image!.SaveAsync(ms, PngFormat.Instance);
 
         var imageBytes = ms.ToArray();
 
-        //await logger.LogAsync("Generated captcha image. (Session ID: " + sessionId + ")");
         log.Info("Generated captcha image. (Session ID: " + sessionId + ")");
 
         return Results.Ok(new { sessionId, captchaImage = Convert.ToBase64String(imageBytes) });
     }
+    catch (Exception ex)
+    {
+        return BuildErrorResponse(log, ex, "Failed to generate captcha.", "Failed to generate captcha.");
+    }
 });
 
-app.MapPost("/survey", async([FromServices] IAntiforgery antiforgery,
+app.MapPost("/survey", async ([FromServices] IAntiforgery antiforgery,
                              [FromBody] SurveyData surveyData,
-                             [FromServices] DatabaseService db) =>
+                             [FromServices] DatabaseService db,
+                             [FromServices] ILog log) =>
 {
-    var result = await db.CanSubmitSurvey(surveyData);
-
-    if(!result)
+    try
     {
-        return Results.Ok("This survey has already been submitted.");
+        var canSubmit = await db.CanSubmitSurvey(surveyData);
+
+        if (!canSubmit)
+        {
+            log.Warn($"Survey submission rejected: survey '{surveyData.surveyId}' was already submitted.");
+            return Results.Ok("This survey has already been submitted.");
+        }
+
+        await db.SubmitSurvey(surveyData);
+
+        log.Info($"Survey '{surveyData.surveyId}' submitted successfully.");
+
+        return Results.Ok(surveyData);
     }
-
-    await db.SubmitSurvey(surveyData);
-
-    return Results.Ok(surveyData);
+    catch (Exception ex)
+    {
+        return BuildErrorResponse(log, ex, "Failed to process survey submission.", "Failed to submit survey.");
+    }
 }).DisableAntiforgery();
 
 app.MapPost("/submit-form", async ([FromServices] IAntiforgery antiforgery,
-                                    [FromForm] JsonElement formData,
                                     [FromForm] IFormFileCollection files,
                                     [FromServices] ILog log,
                                     [FromServices] DatabaseService db,
@@ -210,119 +245,138 @@ app.MapPost("/submit-form", async ([FromServices] IAntiforgery antiforgery,
                                     IMemoryCache cache,
                                     HttpContext context) =>
 {
-    SanitizingService sanitizingService = new SanitizingService();
-    sanitizingService.SanitizeClass(formData);
-
-    //await logger.LogAsync($"Received {files.Count} files");
-    log.Info($"Received {files.Count} files");
-
-    foreach(var file in files)
+    try
     {
-        var extension = Path.GetExtension(file.FileName);
+        // [FromForm] JsonElement is not a supported minimal-API binding source - it silently
+        // resolves to an uninitialized JsonElement instead of failing, which then throws on
+        // first use (e.g. TryGetProperty). Build the JsonElement explicitly from the parsed
+        // form fields instead.
+        var formFields = context.Request.Form.Keys.ToDictionary(key => key, key => context.Request.Form[key].ToString());
+        var formData = JsonSerializer.SerializeToElement(formFields);
 
-        if(string.IsNullOrEmpty(extension) || !allowedExtensions.Contains(extension))
-        {
-            return Results.Ok($"File '{file.FileName}' has an illegal file extension.");
-        }
-    }
+        var sanitizingService = new SanitizingService();
+        sanitizingService.SanitizeClass(formData);
 
-    var inquiryId = Guid.NewGuid();
-
-    var savedFiles = new List<string>();
-
-    if (files is not null && files.Count > 0)
-    {
-        log.Info("Files detected. File count is " + files.Count);
-
-        var baseUploadsPath = !string.IsNullOrWhiteSpace(envConfig.SaveFileFolder) && envConfig.SaveFileFolder != "DEFAULT VALUE"
-            ? envConfig.SaveFileFolder
-            : Path.Combine(Directory.GetCurrentDirectory(), "Uploads");
-
-        var uploadsPath = Path.Combine(baseUploadsPath, inquiryId.ToString());
-
-        if (!Directory.Exists(uploadsPath))
-            Directory.CreateDirectory(uploadsPath);
+        log.Info($"Received {files.Count} files");
 
         foreach (var file in files)
         {
-            if (file.Length > 0)
+            var extension = Path.GetExtension(file.FileName);
+
+            if (string.IsNullOrEmpty(extension) || !allowedExtensions.Contains(extension))
             {
-                log.Info("File being saved");
-
-                var filePath = Path.Combine(uploadsPath, file.FileName);
-                using var stream = new FileStream(filePath, FileMode.Create);
-
-                await file.CopyToAsync(stream);
-                savedFiles.Add(file.FileName);
-
-                log.Info("File was saved.");
+                log.Warn($"Rejected submission: file '{file.FileName}' has an illegal file extension.");
+                return Results.Ok($"File '{file.FileName}' has an illegal file extension.");
             }
         }
+
+        var inquiryId = Guid.NewGuid();
+
+        var savedFiles = new List<string>();
+
+        if (files is not null && files.Count > 0)
+        {
+            log.Info("Files detected. File count is " + files.Count);
+
+            var baseUploadsPath = !string.IsNullOrWhiteSpace(envConfig.SaveFileFolder) && envConfig.SaveFileFolder != "DEFAULT VALUE"
+                ? envConfig.SaveFileFolder
+                : Path.Combine(Directory.GetCurrentDirectory(), "Uploads");
+
+            var uploadsPath = Path.Combine(baseUploadsPath, inquiryId.ToString());
+
+            if (!Directory.Exists(uploadsPath))
+                Directory.CreateDirectory(uploadsPath);
+
+            foreach (var file in files)
+            {
+                if (file.Length > 0)
+                {
+                    var filePath = Path.Combine(uploadsPath, file.FileName);
+                    using var stream = new FileStream(filePath, FileMode.Create);
+
+                    await file.CopyToAsync(stream);
+                    savedFiles.Add(file.FileName);
+
+                    log.Info($"File '{file.FileName}' was saved.");
+                }
+            }
+        }
+        else
+        {
+            log.Info("No files detected");
+        }
+
+        if (!formData.TryGetProperty("captchaSessionId", out var captchaSessionId))
+            return Results.BadRequest("Invalid input.");
+
+        if (!formData.TryGetProperty("captchaCode", out var captchaCode))
+            return Results.BadRequest("Invalid input.");
+
+        if (captchaSessionId.ValueKind != JsonValueKind.String)
+            return Results.BadRequest("Must be a string.");
+
+        if (captchaCode.ValueKind != JsonValueKind.String)
+            return Results.BadRequest("Must be a string.");
+
+        var isCaptchaValid = cs.ValidateCaptcha(captchaSessionId.GetString(), captchaCode.GetString(), cache);
+
+        if (!isCaptchaValid)
+        {
+            log.Warn("Form submission rejected due to invalid captcha.");
+            return Results.Ok("Invalid captcha.");
+        }
+
+        // פה יש צורך לבצע שמירה של הנתונים בצורה כזאת או אחרת.
+
+        var response = new
+        {
+            Message = "Form submitted successfully!",
+            FormData = formData,
+            UploadedFiles = savedFiles
+        };
+
+        log.Info("Form submitted successfully.");
+
+        return Results.Json(response);
     }
-    else
+    catch (Exception ex)
     {
-        log.Info("No files detected");
+        return BuildErrorResponse(log, ex, "Failed to process form submission.", "Failed to submit form.");
     }
-
-    JsonElement captchaSessionId;
-    JsonElement captchaCode;
-
-    if (!formData.TryGetProperty("captchaSessionId", out captchaSessionId))
-        return Results.BadRequest("Invalid input.");
-
-    if (!formData.TryGetProperty("captchaCode", out captchaCode))
-        return Results.BadRequest("Invalid input.");
-
-    if (captchaSessionId.ValueKind != JsonValueKind.String)
-        return Results.BadRequest("Must be a string.");
-
-    if (captchaCode.ValueKind != JsonValueKind.String)
-        return Results.BadRequest("Must be a string.");
-
-    var isCaptchaValid = cs.ValidateCaptcha(captchaSessionId.GetString(), captchaCode.GetString(), cache);
-
-    if (!isCaptchaValid)
-        return Results.Ok("Invalid captcha.");
-
-    // פה יש צורך לבצע שמירה של הנתונים בצורה כזאת או אחרת.
-
-    var response = new
-    {
-        Message = "Form submitted successfully!",
-        FormData = formData,
-        UploadedFiles = savedFiles
-    };
-
-    return Results.Json(response);
 }).DisableAntiforgery();
 
-app.MapGet("/log", async (HttpContext context, [FromServices] IConfiguration config) =>
+app.MapGet("/log", ([FromServices] ILog log, HttpContext context) =>
 {
-    // Default value
-    int linesToRead = 50;
-
-    // Parse optional query parameter
-    if (context.Request.Query.TryGetValue("lines", out var linesVal) && int.TryParse(linesVal, out var parsedLines))
+    try
     {
-        linesToRead = parsedLines;
+        // Default value
+        int linesToRead = 50;
+
+        // Parse optional query parameter
+        if (context.Request.Query.TryGetValue("lines", out var linesVal) && int.TryParse(linesVal, out var parsedLines))
+        {
+            linesToRead = parsedLines;
+        }
+
+        if (!File.Exists(logPath))
+        {
+            return Results.Ok("Log file not found.");
+        }
+
+        var lines = LogService.ReadLastLines(logPath, linesToRead);
+
+        return Results.Json(lines, new JsonSerializerOptions
+        {
+            WriteIndented = true
+        });
     }
-
-    Console.WriteLine(logPath);
-
-    if (!File.Exists(logPath))
+    catch (Exception ex)
     {
-        return Results.Ok("Log file not found.");
+        return BuildErrorResponse(log, ex, "Failed to read log file.", "Failed to read log file.");
     }
-
-    var lines = LogService.ReadLastLines(logPath, linesToRead);
-
-    return Results.Json(lines, new System.Text.Json.JsonSerializerOptions
-    {
-        WriteIndented = true
-    });
 });
 
-app.MapPost("/send-email", async (EmailRequest request) =>
+app.MapPost("/send-email", async (EmailRequest request, [FromServices] ILog log) =>
 {
     var smtpServer = "SERVER IP";
     var smtpPort = 587;
@@ -334,7 +388,6 @@ app.MapPost("/send-email", async (EmailRequest request) =>
     ServicePointManager.ServerCertificateValidationCallback =
         (sender, certificate, chain, sslPolicyErrors) => true;
 
-    // ---- NEW: Decode the Base64 issue string ----
     string decodedIssue;
     try
     {
@@ -345,7 +398,6 @@ app.MapPost("/send-email", async (EmailRequest request) =>
     {
         decodedIssue = "**Failed to decode Base64 issue**";
     }
-    // --------------------------------------------
 
     var subject = "בקשה חסומה - פניות הציבור";
 
@@ -384,13 +436,14 @@ app.MapPost("/send-email", async (EmailRequest request) =>
 
         await smtp.SendMailAsync(message);
 
+        log.Info("Email sent successfully.");
+
         return Results.Ok(new { success = true, message = "Email sent." });
     }
     catch (Exception ex)
     {
-        return Results.Problem("Failed to send email: " + ex.Message);
+        return BuildErrorResponse(log, ex, "Failed to send email.", "Failed to send email.");
     }
 });
-
 
 app.Run();
