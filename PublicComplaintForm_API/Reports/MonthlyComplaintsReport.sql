@@ -18,8 +18,11 @@
 -- );
 --
 -- Recommended supporting index (see performance notes below):
--- CREATE NONCLUSTERED INDEX IX_Complaints_DepartmentId_CreatedDate
---     ON Complaints (DepartmentId, CreatedDate);
+-- The query filters only on CreatedDate (no DepartmentId predicate), so CreatedDate
+-- must lead the key. DepartmentId is included so the index alone covers the query
+-- (no key/RID lookup into the clustered index).
+-- CREATE NONCLUSTERED INDEX IX_Complaints_CreatedDate_DepartmentId
+--     ON Complaints (CreatedDate) INCLUDE (DepartmentId);
 -- ============================================================================
 
 DECLARE @ReportYear  INT = YEAR(GETDATE());
@@ -35,50 +38,45 @@ DECLARE @PrevMonthEnd        DATE = @CurrentMonthStart;
 DECLARE @PrevYearStart       DATE = DATEADD(YEAR, -1, @CurrentMonthStart);
 DECLARE @PrevYearEnd         DATE = DATEADD(MONTH, 1, @PrevYearStart);
 
-;WITH MonthlyCounts AS
+;WITH DepartmentCounts AS
 (
-    -- One row per department per calendar month that actually has complaints.
-    -- Only scans the 3 relevant windows (current / prev month / same month last year),
-    -- not the whole table.
+    -- Single pass over the 3 relevant windows only (current / prev month / same month
+    -- last year) - never scans the months in between. Each window is bucketed directly
+    -- into its own conditional SUM ("pivot" via conditional aggregation), so there is no
+    -- need to compute a per-row calendar-month key or to join the result back to itself
+    -- once per comparison.
     SELECT
         c.DepartmentId,
-        DATEFROMPARTS(YEAR(c.CreatedDate), MONTH(c.CreatedDate), 1) AS ComplaintMonth,
-        COUNT(*) AS ComplaintCount
+        SUM(CASE WHEN c.CreatedDate >= @CurrentMonthStart AND c.CreatedDate < @CurrentMonthEnd THEN 1 ELSE 0 END) AS CurrentMonthCount,
+        SUM(CASE WHEN c.CreatedDate >= @PrevMonthStart    AND c.CreatedDate < @PrevMonthEnd    THEN 1 ELSE 0 END) AS PreviousMonthCount,
+        SUM(CASE WHEN c.CreatedDate >= @PrevYearStart     AND c.CreatedDate < @PrevYearEnd     THEN 1 ELSE 0 END) AS SameMonthLastYearCount
     FROM Complaints c
     WHERE
         (c.CreatedDate >= @CurrentMonthStart AND c.CreatedDate < @CurrentMonthEnd)
         OR (c.CreatedDate >= @PrevMonthStart AND c.CreatedDate < @PrevMonthEnd)
         OR (c.CreatedDate >= @PrevYearStart AND c.CreatedDate < @PrevYearEnd)
     GROUP BY
-        c.DepartmentId,
-        DATEFROMPARTS(YEAR(c.CreatedDate), MONTH(c.CreatedDate), 1)
+        c.DepartmentId
 )
 SELECT
     d.DepartmentId,
     d.DepartmentName,
     @CurrentMonthStart                                     AS ReportMonth,
-    ISNULL(cur.ComplaintCount, 0)                          AS CurrentMonthCount,
-    ISNULL(prevMonth.ComplaintCount, 0)                    AS PreviousMonthCount,
-    ISNULL(prevYear.ComplaintCount, 0)                     AS SameMonthLastYearCount,
+    ISNULL(dc.CurrentMonthCount, 0)                        AS CurrentMonthCount,
+    ISNULL(dc.PreviousMonthCount, 0)                       AS PreviousMonthCount,
+    ISNULL(dc.SameMonthLastYearCount, 0)                   AS SameMonthLastYearCount,
     CAST(
-        CASE WHEN ISNULL(prevMonth.ComplaintCount, 0) = 0 THEN NULL
-             ELSE (cur.ComplaintCount - prevMonth.ComplaintCount) * 100.0 / prevMonth.ComplaintCount
+        CASE WHEN ISNULL(dc.PreviousMonthCount, 0) = 0 THEN NULL
+             ELSE (dc.CurrentMonthCount - dc.PreviousMonthCount) * 100.0 / dc.PreviousMonthCount
         END AS DECIMAL(10, 2)
     )                                                        AS MoMChangePercent,
     CAST(
-        CASE WHEN ISNULL(prevYear.ComplaintCount, 0) = 0 THEN NULL
-             ELSE (cur.ComplaintCount - prevYear.ComplaintCount) * 100.0 / prevYear.ComplaintCount
+        CASE WHEN ISNULL(dc.SameMonthLastYearCount, 0) = 0 THEN NULL
+             ELSE (dc.CurrentMonthCount - dc.SameMonthLastYearCount) * 100.0 / dc.SameMonthLastYearCount
         END AS DECIMAL(10, 2)
     )                                                        AS YoYChangePercent
 FROM Departments d
-LEFT JOIN MonthlyCounts cur
-    ON cur.DepartmentId = d.DepartmentId
-   AND cur.ComplaintMonth = @CurrentMonthStart
-LEFT JOIN MonthlyCounts prevMonth
-    ON prevMonth.DepartmentId = d.DepartmentId
-   AND prevMonth.ComplaintMonth = @PrevMonthStart
-LEFT JOIN MonthlyCounts prevYear
-    ON prevYear.DepartmentId = d.DepartmentId
-   AND prevYear.ComplaintMonth = @PrevYearStart
+LEFT JOIN DepartmentCounts dc
+    ON dc.DepartmentId = d.DepartmentId
 ORDER BY
     d.DepartmentName;
