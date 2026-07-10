@@ -2,9 +2,9 @@
 {
     public class ConfigSettings
     {
-        public string LocalSQL { get; set; }
-        public string SaveFileFolder { get; set; }
-        public string SurveySQLConnectionString { get; set; }
-        public List<string> EmailList { get; set; }
+        public string LocalSQL { get; set; } = string.Empty;
+        public string SaveFileFolder { get; set; } = string.Empty;
+        public string SurveySQLConnectionString { get; set; } = string.Empty;
+        public List<string> EmailList { get; set; } = new();
     }
 }
