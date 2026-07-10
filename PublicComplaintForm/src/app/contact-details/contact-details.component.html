@@ -9,6 +9,58 @@
 
     <div class="form-container" [formGroup]="form">
 
+        <div class="form-field-container description-field-container">
+
+            <div class="description-text-container">
+                <img src="description-icon.svg" alt="אייקון נורה - המסמל אזור הסבר"/>
+                <span class="description-text">יש לכלול תיאור נושא ומהות הפניה, יש לנסח באופן תמציתי וברור את מה שטוענים או מבקשים. תוך ציון פרטים רלוונטים לצורך טיפול בפניה ומועדים של האירועים בהם עוסקת הפניה.</span>
+            </div>
+
+            <div class="dot-row">
+                <label for="contact-description-textarea" class="form-field-name">תיאור הפנייה</label>
+                <h3 class="required-form-field">*</h3>
+            </div>
+
+            <textarea
+                id="contact-description-textarea"
+                formControlName="contactDescription"
+                maxlength="7000"
+                rows="8"
+                (input)="OnTextAreaChanged($event)"
+                [ngClass]="{'error-field': form.controls['contactDescription'].errors?.['required'] && form.controls['contactDescription'].touched}">
+            </textarea>
+
+            <div class="description-field-footer">
+                <p class="character-counter-text">{{textAreaRemainingCharacters}}</p>
+
+                <div *ngIf="form.controls['contactDescription'].errors?.['required'] && form.controls['contactDescription'].touched" class="validation-mark description-validation-mark">
+                    <img src="validation-mark.svg"/>
+                    <p class="validation-text">שדה חובה</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="form-row">
+
+            <div class="form-field-container">
+                <label for="court-case-number-input" class="form-field-name">מספר תיק (אם קיים)</label>
+                <input id="court-case-number-input" formControlName="courtCaseNumber" [ngClass]="{'error-field': form.controls['courtCaseNumber'].errors?.['pattern'] && form.controls['courtCaseNumber'].touched}"/>
+
+                <div *ngIf="form.controls['courtCaseNumber'].errors?.['pattern'] && form.controls['courtCaseNumber'].touched" class="validation-mark">
+                    <img src="validation-mark.svg"/>
+                    <p class="validation-text">יש להזין מספרים בלבד</p>
+                </div>
+            </div>
+
+            <div class="form-field-container size-limit-for-matselect-container">
+                <h3 class="form-field-name">בית משפט (אם רלוונטי)</h3>
+                <mat-select (selectionChange)="OnCourtSelectionChanged($event)" [(value)]="selectedCourt" id="courthouse-select">
+                    <mat-option *ngFor="let court of courtsList" [value]="court">{{ court.courtName || court }}</mat-option>
+                </mat-select>
+            </div>
+
+        </div>
+
     </div>
 
     <div class="button-container">

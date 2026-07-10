@@ -5,10 +5,17 @@
 /out-tsc
 /bazel-out
 
-obj/
+# .NET build output
+**/bin/
+**/obj/
+*.user
+*.pubxml
+*.pubxml.user
 
-# Node
-/node_modules
+# Node / Angular
+**/node_modules/
+**/dist/
+**/.angular/
 npm-debug.log
 yarn-error.log
 
@@ -20,6 +27,15 @@ yarn-error.log
 *.launch
 .settings/
 *.sublime-workspace
+**/.lens/
+
+# Visual Studio
+**/.vs/
+*.vsidx
+**/Visual Studio 2022/
+
+# Orphaned/unreferenced build output (not part of any project source)
+PublicComplaintForm_API/Library/
 
 # Visual Studio Code
 .vscode/*
@@ -29,8 +45,12 @@ yarn-error.log
 !.vscode/extensions.json
 .history/*
 
+# App runtime artifacts (created on run, not part of source)
+**/Uploads/
+**/Logs/
+**/logs/
+
 # Miscellaneous
-/.angular/cache
 .sass-cache/
 /connect.lock
 /coverage
@@ -42,4 +62,5 @@ testem.log
 .DS_Store
 Thumbs.db
 
-*.vsidx
+# Local AI tooling config (not part of the project deliverable)
+.claude/

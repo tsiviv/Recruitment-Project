@@ -54,7 +54,7 @@
 .description-text-container
 {
     margin-top: 22px;
-    margin-bottom: 0px;
+    margin-bottom: 32px;
     text-align: start;
     padding: 12px 24px;
     background-color: #E0E9FC;
@@ -185,6 +185,26 @@ button:hover
     gap: 30px;
 
     width: 100%;
+}
+
+.description-field-container
+{
+    width: 100%;
+}
+
+.description-field-footer
+{
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+
+    margin-top: 24px;
+}
+
+.description-validation-mark
+{
+    position: static;
+    margin-top: 0px;
 }
 
 input

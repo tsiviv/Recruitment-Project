@@ -46,7 +46,7 @@ export class ContactDetailsComponent implements OnInit
 	{
 		this.form = this.formBuilder.group({
 			contactDescription: ['', Validators.required],
-			courtCaseNumber: [''],
+			courtCaseNumber: ['', Validators.pattern('[0-9]+')],
 			courthouse: ['']
 		});
 		//this.form = this.formHandlerService.getStepValues('3');

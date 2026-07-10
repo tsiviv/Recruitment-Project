@@ -78,5 +78,60 @@ namespace PublicComplaintForm_API.Services
         {
             return;
         }
+
+        // NOTE: Against a real database this would run the aggregated report query
+        // (Reports/MonthlyComplaintsReport.sql) via Dapper against the Complaints/
+        // Departments tables, parameterized by @ReportYear/@ReportMonth. No live DB
+        // is wired up in this environment, so deterministic dummy data is generated
+        // instead, in the same shape the real query would return.
+        public async Task<List<MonthlyDepartmentComplaintReport>> GetMonthlyComplaintReport(int year, int month)
+        {
+            var departments = new[]
+            {
+                "מחלקת פניות ותלונות",
+                "מחלקת גבייה",
+                "מחלקת מידע ומוקד",
+                "מחלקת הוצאה לפועל",
+                "מחלקת בתי משפט"
+            };
+
+            var (prevMonthYear, prevMonth) = month == 1 ? (year - 1, 12) : (year, month - 1);
+
+            var report = departments.Select(department =>
+            {
+                var currentCount = GenerateDeterministicCount(department, year, month);
+                var previousMonthCount = GenerateDeterministicCount(department, prevMonthYear, prevMonth);
+                var sameMonthLastYearCount = GenerateDeterministicCount(department, year - 1, month);
+
+                return new MonthlyDepartmentComplaintReport
+                {
+                    DepartmentName = department,
+                    Year = year,
+                    Month = month,
+                    CurrentMonthCount = currentCount,
+                    PreviousMonthCount = previousMonthCount,
+                    SameMonthLastYearCount = sameMonthLastYearCount,
+                    MoMChangePercent = CalculatePercentChange(currentCount, previousMonthCount),
+                    YoYChangePercent = CalculatePercentChange(currentCount, sameMonthLastYearCount)
+                };
+            }).ToList();
+
+            return await Task.FromResult(report);
+        }
+
+        private static int GenerateDeterministicCount(string department, int year, int month)
+        {
+            var seed = HashCode.Combine(department, year, month);
+            var random = new Random(seed);
+            return random.Next(50, 300);
+        }
+
+        private static decimal? CalculatePercentChange(int current, int previous)
+        {
+            if (previous == 0)
+                return null;
+
+            return Math.Round((current - previous) * 100m / previous, 2);
+        }
     }
 }

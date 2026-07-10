@@ -65,7 +65,22 @@ builder.Services.AddAntiforgery(options =>
     options.HeaderName = "X-CSRF-TOKEN";
 });
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("LocalDev", policy =>
+    {
+        policy.WithOrigins("http://localhost:4200")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
 var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseCors("LocalDev");
+}
 
 if (app.Environment.IsDevelopment())
 {
@@ -121,6 +136,27 @@ app.MapGet("/courts", async ([FromServices] ILog log,
     List<Court> courtsList = await db.FetchCourtList();
 
     return Results.Ok(new { courtsList });
+});
+
+app.MapGet("/reports/monthly-complaints", async ([FromServices] ILog log,
+                                                   [FromServices] DatabaseService db,
+                                                   HttpContext context) =>
+{
+    var reportDate = DateTime.UtcNow;
+    var year = reportDate.Year;
+    var month = reportDate.Month;
+
+    if (context.Request.Query.TryGetValue("year", out var yearVal) && int.TryParse(yearVal, out var parsedYear))
+        year = parsedYear;
+
+    if (context.Request.Query.TryGetValue("month", out var monthVal) && int.TryParse(monthVal, out var parsedMonth) && parsedMonth >= 1 && parsedMonth <= 12)
+        month = parsedMonth;
+
+    log.Info($"Someone accessed /reports/monthly-complaints endpoint. (Year: {year}, Month: {month})");
+
+    var report = await db.GetMonthlyComplaintReport(year, month);
+
+    return Results.Ok(new { year, month, report });
 });
 
 app.MapGet("/captcha", async ([FromServices] CaptchaService cs,
@@ -192,17 +228,20 @@ app.MapPost("/submit-form", async ([FromServices] IAntiforgery antiforgery,
 
     var inquiryId = Guid.NewGuid();
 
-    var uploadsPath = Path.Combine(Directory.GetCurrentDirectory(), "Uploads");
-    uploadsPath = Path.Combine(envConfig.SaveFileFolder, inquiryId.ToString());
-
-    if (!Directory.Exists(uploadsPath))
-        Directory.CreateDirectory(uploadsPath);
-
     var savedFiles = new List<string>();
 
-    if (files is not null)
+    if (files is not null && files.Count > 0)
     {
         log.Info("Files detected. File count is " + files.Count);
+
+        var baseUploadsPath = !string.IsNullOrWhiteSpace(envConfig.SaveFileFolder) && envConfig.SaveFileFolder != "DEFAULT VALUE"
+            ? envConfig.SaveFileFolder
+            : Path.Combine(Directory.GetCurrentDirectory(), "Uploads");
+
+        var uploadsPath = Path.Combine(baseUploadsPath, inquiryId.ToString());
+
+        if (!Directory.Exists(uploadsPath))
+            Directory.CreateDirectory(uploadsPath);
 
         foreach (var file in files)
         {
@@ -212,7 +251,7 @@ app.MapPost("/submit-form", async ([FromServices] IAntiforgery antiforgery,
 
                 var filePath = Path.Combine(uploadsPath, file.FileName);
                 using var stream = new FileStream(filePath, FileMode.Create);
-              
+
                 await file.CopyToAsync(stream);
                 savedFiles.Add(file.FileName);
 
